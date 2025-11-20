@@ -1,204 +1,115 @@
-/* ============================
-   bills.js
-   إدارة الفواتير الشهرية
-   ============================ */
+/* bills.js
+ * Bills list with monthly auto-renew and posting to transactions.
+ */
 
-/*
-المهام:
-1. جلب قائمة الفواتير الشهرية من الشيت.
-2. عرضها في شاشة "الفواتير الشهرية".
-3. إضافة فاتورة جديدة (اسم، مبلغ، تاريخ استحقاق، حالة الدفع).
-4. تحديث حالة الدفع (مدفوعة/غير مدفوعة).
-5. إطلاق التنبيه الإجباري (الـoverlay مع الـblur) عند الاقتراب من الاستحقاق.
-*/
-
-const BillsState = {
-  list: [], // [{id,name,amount,dueDate,status}]
+var BillsState = {
+  bills: []
 };
 
-document.addEventListener("DOMContentLoaded", () => {
-  const billsListEl = document.getElementById("bills-list");
-
-  const billNameInput   = document.getElementById("bill-name");
-  const billAmountInput = document.getElementById("bill-amount");
-  const billDueInput    = document.getElementById("bill-due");
-  const billStatusSel   = document.getElementById("bill-status");
-
-  const saveBillBtn = document.getElementById("save-bill");
-  const modalBill   = document.getElementById("modal-bill");
-
-  // تحميل الفواتير أول ما ندخل على الشاشة
-  refreshBillsUI();
-
-  // زر "حفظ الفاتورة"
-  if (saveBillBtn) {
-    saveBillBtn.addEventListener("click", async () => {
-      const name = (billNameInput.value || "").trim();
-      const amount = Number(billAmountInput.value || 0);
-      const dueDate = billDueInput.value; // "YYYY-MM-DD"
-      const status = billStatusSel.value;
-
-      if (!name || !amount || !dueDate) {
-        alert("يرجى إدخال اسم، مبلغ، وتاريخ استحقاق.");
-        return;
-      }
-
-      const res = await addBill({
-        name,
-        amount,
-        dueDate,
-        status,
-      });
-
-      if (!res || !res.ok) {
-        alert("فشل حفظ الفاتورة");
-        return;
-      }
-
-      // نظّف
-      billNameInput.value = "";
-      billAmountInput.value = "";
-      billDueInput.value = "";
-      billStatusSel.value = "unpaid";
-
-      // سكّر المودال
-      if (modalBill) modalBill.classList.add("hidden");
-
-      // حدث الواجهة
-      refreshBillsUI();
-    });
-  }
-
-  // تحميل الفواتير من GAS
-  async function refreshBillsUI() {
-    const res = await fetchBills();
-    if (!res || !res.ok || !Array.isArray(res.bills)) {
-      BillsState.list = [];
-    } else {
-      BillsState.list = res.bills;
-    }
-
+function refreshBillsUI() {
+  if (!window.GasApi) return;
+  GasApi.fetchBills().then(function (res) {
+    if (!res || !res.ok) return;
+    BillsState.bills = res.bills || [];
     renderBillsList();
-    checkCriticalBills();
+  }).catch(function (err) {
+    console.error("fetchBills error", err);
+  });
+}
+
+function renderBillsList() {
+  var container = document.getElementById("bills-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  var unpaid = BillsState.bills.filter(function (b) { return String(b.status) !== "paid"; });
+  if (!unpaid.length) {
+    container.textContent = "لا توجد فواتير حالياً.";
+    return;
   }
 
-  // عرض الفواتير
-  function renderBillsList() {
-    if (!billsListEl) return;
-    billsListEl.innerHTML = "";
+  unpaid.forEach(function (b) {
+    var row = document.createElement("div");
+    row.className = "list-row";
 
-    if (!BillsState.list.length) {
-      const empty = document.createElement("div");
-      empty.className = "tiny-note";
-      empty.textContent = "لا توجد فواتير مسجلة.";
-      billsListEl.appendChild(empty);
-      return;
-    }
+    var main = document.createElement("div");
+    main.className = "list-main";
 
-    BillsState.list.forEach(bill => {
-      /*
-      bill: {
-        id, name, amount, dueDate("2025-11-05"), status("paid"|"unpaid")
-      }
-      */
-      const row = document.createElement("div");
-      row.className = "list-row";
+    var title = document.createElement("div");
+    title.className = "list-title";
+    title.textContent = b.name + " - " + (b.amount || 0);
 
-      const header = document.createElement("div");
-      header.className = "list-row-header";
+    var meta = document.createElement("div");
+    meta.className = "list-meta";
+    var badges = [];
+    if (String(b.isMonthly).toLowerCase() === "yes") badges.push("شهرية");
+    if (String(b.autoRenew).toLowerCase() === "yes") badges.push("تجديد تلقائي");
+    meta.textContent = "استحقاق: " + (b.dueDate || "") + (badges.length ? (" | " + badges.join(" + ")) : "");
 
-      const leftSide = document.createElement("div");
-      leftSide.textContent = `${bill.name} - ${bill.amount} شيكل`;
+    main.appendChild(title);
+    main.appendChild(meta);
 
-      const rightSide = document.createElement("div");
-      rightSide.textContent = `استحقاق: ${bill.dueDate || ""}`;
+    var actions = document.createElement("div");
+    actions.className = "list-actions";
 
-      header.appendChild(leftSide);
-      header.appendChild(rightSide);
-
-      const sub = document.createElement("div");
-      sub.className = "list-row-sub";
-
-      const st = document.createElement("div");
-      st.textContent = "الحالة: " + (bill.status === "paid" ? "مدفوعة" : "غير مدفوعة");
-      sub.appendChild(st);
-
-      const actions = document.createElement("div");
-      actions.className = "list-row-actions";
-
-      // زر "تم الدفع"
-      const paidBtn = document.createElement("button");
-      paidBtn.className = "btn success-btn";
-      paidBtn.style.minHeight = "32px";
-      paidBtn.style.fontSize = "13px";
-      paidBtn.textContent = "تم الدفع";
-      paidBtn.addEventListener("click", async () => {
-        const upd = await updateBillStatus({ billId: bill.id, status: "paid" });
-        if (!upd || !upd.ok) {
-          alert("تعذّر التحديث");
-          return;
-        }
+    var paidBtn = document.createElement("button");
+    paidBtn.className = "btn primary-btn";
+    paidBtn.textContent = "مدفوعة";
+    paidBtn.addEventListener("click", function () {
+      GasApi.updateBillStatus(b.id, "paid").then(function () {
         refreshBillsUI();
       });
-      actions.appendChild(paidBtn);
-
-      // زر "غير مدفوعة"
-      const unpaidBtn = document.createElement("button");
-      unpaidBtn.className = "btn danger-btn";
-      unpaidBtn.style.minHeight = "32px";
-      unpaidBtn.style.fontSize = "13px";
-      unpaidBtn.textContent = "غير مدفوعة";
-      unpaidBtn.addEventListener("click", async () => {
-        const upd = await updateBillStatus({ billId: bill.id, status: "unpaid" });
-        if (!upd || !upd.ok) {
-          alert("تعذّر التحديث");
-          return;
-        }
-        refreshBillsUI();
-      });
-      actions.appendChild(unpaidBtn);
-
-      row.appendChild(header);
-      row.appendChild(sub);
-      row.appendChild(actions);
-
-      billsListEl.appendChild(row);
     });
+
+    actions.appendChild(paidBtn);
+
+    row.appendChild(main);
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
+}
+
+function handleAddBillClicked() {
+  var nameInput = document.getElementById("bill-name");
+  var amountInput = document.getElementById("bill-amount");
+  var dueInput = document.getElementById("bill-due");
+  var statusInput = document.getElementById("bill-status");
+  var monthlyCheckbox = document.getElementById("bill-is-monthly");
+  var renewCheckbox = document.getElementById("bill-auto-renew");
+
+  if (!nameInput || !amountInput || !dueInput) return;
+
+  var name = nameInput.value.trim();
+  var amount = parseFloat(amountInput.value || "0");
+  var due = dueInput.value;
+  var status = statusInput ? statusInput.value : "unpaid";
+  var isMonthly = monthlyCheckbox && monthlyCheckbox.checked;
+  var autoRenew = renewCheckbox && renewCheckbox.checked;
+
+  if (!name || !due) {
+    alert("أدخل اسم الفاتورة وتاريخ الاستحقاق");
+    return;
   }
 
-  /*
-   checkCriticalBills:
-   - نشيك الفواتير اللي قرب موعدها (خلال 7 أيام من اليوم).
-   - لو لقينا فاتورة غير مدفوعة وموعدها قريب → نعرض الـoverlay الإجباري.
-  */
-  function checkCriticalBills() {
-    const now = new Date();
-    const nowTime = now.getTime();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  GasApi.addBill({
+    name: name,
+    amount: amount,
+    dueDate: due,
+    status: status,
+    isMonthly: isMonthly,
+    autoRenew: autoRenew
+  }).then(function () {
+    nameInput.value = "";
+    amountInput.value = "";
+    dueInput.value = "";
+    if (monthlyCheckbox) monthlyCheckbox.checked = false;
+    if (renewCheckbox) renewCheckbox.checked = false;
+    refreshBillsUI();
+  });
+}
 
-    for (const b of BillsState.list) {
-      if (b.status === "paid") continue;
-      if (!b.dueDate) continue;
-
-      const due = new Date(b.dueDate + "T00:00:00");
-      const diff = due.getTime() - nowTime;
-
-      // إذا الفاتورة خلال أسبوع أو أقل (>=0 يعني لسه ما مر الموعد)
-      if (diff <= sevenDaysMs && diff >= 0) {
-        // اعرض التحذير
-        if (typeof showCriticalBillAlert === "function") {
-          showCriticalBillAlert({
-            name: b.name,
-            amount: b.amount,
-            dueDate: b.dueDate,
-            status: b.status === "paid" ? "مدفوعة" : "غير مدفوعة",
-          });
-        }
-        // أول فاتورة كفاية
-        break;
-      }
-    }
-  }
+document.addEventListener("DOMContentLoaded", function () {
+  var btn = document.getElementById("bill-add-btn");
+  if (btn) btn.addEventListener("click", handleAddBillClicked);
+  refreshBillsUI();
 });
-
-console.log("bills.js جاهز ✅");

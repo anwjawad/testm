@@ -1,155 +1,129 @@
-/* ============================
-   shopping.js
-   قائمة المشتريات (خاصة بحساب الزوجة)
-   ============================ */
+/* shopping.js
+ * Shopping list: wife (partner) and husband (me) shared.
+ * - Both can add items with category + note and delete items.
+ * - Only "me" can mark as purchased with price, which creates an expense transaction.
+ */
 
-/*
-المهام:
-1. الزوجة تقدر تضيف عناصر مشتريات مطلوبة (نص فقط).
-2. عند المستخدم الأساسي (me):
-   - يقدر يحط سعر الشراء لكل عنصر.
-   - يقدر يضغط "تم الشراء".
-   - هذا ينقل العنصر مباشرة كمصروف إلى Google Sheets
-     ويزيله من قائمة الشراء.
-
-المتطلبات:
-- تظهر القائمة في تبويب "المشتريات".
-*/
-
-const ShoppingState = {
-  list: [], // [{id, name, priceSuggested?, purchased? false}]
+var ShoppingState = {
+  items: []
 };
 
-document.addEventListener("DOMContentLoaded", () => {
-  const shoppingInput = document.getElementById("shopping-item-input");
-  const shoppingAddBtn = document.getElementById("shopping-add-btn");
-  const shoppingListEl = document.getElementById("shopping-list");
-
-  // تحميل أولي
-  refreshShoppingUI();
-
-  // إضافة عنصر جديد للقائمة
-  if (shoppingAddBtn) {
-    shoppingAddBtn.addEventListener("click", async () => {
-      const itemName = (shoppingInput.value || "").trim();
-      if (!itemName) {
-        alert("أدخل اسم العنصر المطلوب");
-        return;
-      }
-
-      const res = await addShoppingItem({ itemName });
-      if (!res || !res.ok) {
-        alert("فشل إضافة العنصر");
-        return;
-      }
-
-      shoppingInput.value = "";
-      refreshShoppingUI();
-    });
-  }
-
-  // عرض قائمة المشتريات
-  async function refreshShoppingUI() {
-    const res = await fetchShoppingList();
-    if (!res || !res.ok || !Array.isArray(res.items)) {
-      ShoppingState.list = [];
-    } else {
-      ShoppingState.list = res.items;
-    }
+function refreshShoppingUI() {
+  if (!window.GasApi) return;
+  GasApi.fetchShoppingList().then(function (res) {
+    if (!res || !res.ok) return;
+    ShoppingState.items = res.items || [];
     renderShoppingList();
+  }).catch(function (err) {
+    console.error("fetchShoppingList error", err);
+  });
+}
+
+function renderShoppingList() {
+  var container = document.getElementById("shopping-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (!ShoppingState.items.length) {
+    container.textContent = "لا توجد عناصر حالياً.";
+    return;
   }
 
-  function renderShoppingList() {
-    if (!shoppingListEl) return;
-    shoppingListEl.innerHTML = "";
+  ShoppingState.items.forEach(function (item) {
+    var row = document.createElement("div");
+    row.className = "list-row";
 
-    if (!ShoppingState.list.length) {
-      const empty = document.createElement("div");
-      empty.className = "tiny-note";
-      empty.textContent = "لا توجد عناصر في قائمة المشتريات.";
-      shoppingListEl.appendChild(empty);
-      return;
-    }
+    var main = document.createElement("div");
+    main.className = "list-main";
 
-    ShoppingState.list.forEach(item => {
-      /*
-      item: {
-        id,
-        name,
-        // priceRecorded? لما ينشتر
+    var title = document.createElement("div");
+    title.className = "list-title";
+    title.textContent = item.name;
+
+    var meta = document.createElement("div");
+    meta.className = "list-meta";
+    var catText = item.category ? ("فئة: " + item.category) : "بدون فئة";
+    var noteText = item.note ? ("ملاحظة: " + item.note) : "";
+    meta.textContent = catText + (noteText ? " | " + noteText : "");
+
+    main.appendChild(title);
+    main.appendChild(meta);
+
+    var actions = document.createElement("div");
+    actions.className = "list-actions";
+
+    // delete button (available for both users)
+    var delBtn = document.createElement("button");
+    delBtn.className = "btn danger-btn";
+    delBtn.textContent = "حذف";
+    delBtn.addEventListener("click", function () {
+      if (AppState.preferences.deleteConfirm === "on") {
+        if (!confirm("هل أنت متأكد من حذف هذا العنصر؟")) return;
       }
-      */
+      GasApi.deleteShoppingItem({ itemId: item.id }).then(function () {
+        refreshShoppingUI();
+      });
+    });
+    actions.appendChild(delBtn);
 
-      const row = document.createElement("div");
-      row.className = "list-row";
+    // purchase controls - only for "me"
+    if (AppState.currentUser === "me") {
+      var priceInput = document.createElement("input");
+      priceInput.type = "number";
+      priceInput.min = "0";
+      priceInput.placeholder = "السعر";
+      priceInput.className = "text-input small";
 
-      const header = document.createElement("div");
-      header.className = "list-row-header";
-
-      const leftSide = document.createElement("div");
-      leftSide.textContent = item.name;
-
-      const rightSide = document.createElement("div");
-      rightSide.textContent = item.priceRecorded
-        ? `تم الشراء بـ ${item.priceRecorded} شيكل`
-        : "لم يُشتر بعد";
-
-      header.appendChild(leftSide);
-      header.appendChild(rightSide);
-
-      row.appendChild(header);
-
-      // لو أنا المستخدم الأساسي، بعطيني فورم السعر + زر "تم الشراء"
-      if (AppState.currentUser === "me") {
-        const sub = document.createElement("div");
-        sub.className = "list-row-sub";
-
-        const priceInput = document.createElement("input");
-        priceInput.type = "number";
-        priceInput.min = "0";
-        priceInput.placeholder = "السعر عند الشراء (شيكل)";
-        priceInput.className = "text-input";
-        priceInput.style.maxWidth = "140px";
-
-        const buyBtn = document.createElement("button");
-        buyBtn.className = "btn success-btn";
-        buyBtn.style.minHeight = "32px";
-        buyBtn.style.fontSize = "13px";
-        buyBtn.textContent = "تم الشراء";
-
-        buyBtn.addEventListener("click", async () => {
-          const priceVal = Number(priceInput.value || 0);
-          if (!priceVal || priceVal <= 0) {
-            alert("يرجى إدخال سعر صحيح");
-            return;
-          }
-
-          // markShoppingItemPurchased:
-          // - يسجل السعر
-          // - يضيف مصروف فعلي في الشيت
-          // - يحذف العنصر من قائمة الشراء
-          const res2 = await markShoppingItemPurchased({
-            itemId: item.id,
-            price: priceVal,
-          });
-
-          if (!res2 || !res2.ok) {
-            alert("تعذر تسجيل الشراء");
-            return;
-          }
-
+      var buyBtn = document.createElement("button");
+      buyBtn.className = "btn primary-btn";
+      buyBtn.textContent = "تم الشراء";
+      buyBtn.addEventListener("click", function () {
+        var price = parseFloat(priceInput.value || "0");
+        if (!price || price <= 0) {
+          alert("أدخل سعر صالح");
+          return;
+        }
+        GasApi.markShoppingItemPurchased({ itemId: item.id, price: price }).then(function () {
           refreshShoppingUI();
         });
+      });
 
-        sub.appendChild(priceInput);
-        sub.appendChild(buyBtn);
+      actions.appendChild(priceInput);
+      actions.appendChild(buyBtn);
+    }
 
-        row.appendChild(sub);
-      }
+    row.appendChild(main);
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
+}
 
-      shoppingListEl.appendChild(row);
-    });
-  }
+function handleAddShoppingClicked() {
+  var nameInput = document.getElementById("shopping-item-input");
+  var catSelect = document.getElementById("shopping-item-category");
+  var noteInput = document.getElementById("shopping-item-note");
+
+  if (!nameInput || !catSelect || !noteInput) return;
+  var name = nameInput.value.trim();
+  var category = catSelect.value || "";
+  var note = noteInput.value.trim();
+
+  if (!name) return;
+
+  GasApi.addShoppingItem({
+    itemName: name,
+    category: category,
+    note: note
+  }).then(function () {
+    nameInput.value = "";
+    noteInput.value = "";
+    catSelect.value = "";
+    refreshShoppingUI();
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  var btn = document.getElementById("shopping-add-btn");
+  if (btn) btn.addEventListener("click", handleAddShoppingClicked);
+  refreshShoppingUI();
 });
-
-console.log("shopping.js جاهز ✅");
