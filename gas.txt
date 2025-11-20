@@ -1,0 +1,801 @@
+/**
+ * إعداد: حط ID ملف Google Sheets تبعك هون.
+ * (الـID هو الجزء الموجود في رابط الشيت بين /d/ و /edit)
+ */
+var SPREADSHEET_ID = "13onTmOO9pGbkdPEFEjQRBGNQGJ1Lh4tMtusKEYHfabI";
+
+/**
+ * أسماء الشيتات المطلوبة
+ */
+var SHEET_NAMES = {
+  TRANSACTIONS: "Transactions",
+  CATEGORIES:   "Categories",
+  BILLS:        "Bills",
+  GOALS:        "Goals",
+  SHOPPING:     "Shopping"
+};
+
+/**
+ * تعريف الأعمدة المطلوبة لكل شيت (الهيدر سطر 1)
+ * مهم: لازم يبقوا بهالترتيب عشان باقي الكود يعتمد عليهم.
+ */
+var SHEET_SCHEMAS = {
+  Transactions: [
+    "id",
+    "timestamp",
+    "type",        // "income" | "expense"
+    "categories",  // نص مفصول بفواصل
+    "amount",
+    "note",
+    "source"
+  ],
+  Categories: [
+    "category"
+  ],
+  Bills: [
+    "id",
+    "name",
+    "amount",
+    "dueDate",
+    "status"       // "paid" | "unpaid"
+  ],
+  Goals: [
+    "id",
+    "rowType",       // "goal" أو "yearly"
+    "goalName",
+    "goalTarget",
+    "goalNote",
+    "yearlyName",
+    "yearlyAmount"
+  ],
+  Shopping: [
+    "id",
+    "name",
+    "priceRecorded",
+    "purchased"      // "yes" | "no"
+  ]
+};
+
+
+/**
+ * ================
+ *  Utilities
+ * ================
+ */
+
+/**
+ * ارجع كائن Spreadsheet
+ */
+function getSpreadsheet() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}
+
+/**
+ * رجّع ورقة باسم محدد، أنشئها إذا مش موجودة، وتأكَّد من الهيدر
+ */
+function ensureSheetAndHeader(sheetName) {
+  var ss = getSpreadsheet();
+  var sh = ss.getSheetByName(sheetName);
+
+  if (!sh) {
+    // أنشئ الشيت لو مش موجود
+    sh = ss.insertSheet(sheetName);
+  }
+
+  // تأكد من وجود الهيدر
+  var requiredHeaders = SHEET_SCHEMAS[sheetName];
+  if (!requiredHeaders || !requiredHeaders.length) {
+    throw new Error("No schema defined for sheet " + sheetName);
+  }
+
+  var lastCol = sh.getLastColumn();
+  var lastRow = sh.getLastRow();
+
+  if (lastRow === 0) {
+    // الشيت فاضي تمامًا → اكتب الهيدر من الصفر
+    sh.getRange(1, 1, 1, requiredHeaders.length)
+      .setValues([ requiredHeaders ]);
+    return sh;
+  }
+
+  // في محتوى، نقرأ أول صف ونقارنه
+  var headerRange = sh.getRange(1, 1, 1, requiredHeaders.length);
+  var currentHeaders = headerRange.getValues()[0];
+  var match = true;
+
+  for (var i = 0; i < requiredHeaders.length; i++) {
+    if (currentHeaders[i] !== requiredHeaders[i]) {
+      match = false;
+      break;
+    }
+  }
+
+  if (!match) {
+    // إذا العناوين غلط / ناقصة → نعيد كتابتها بالقوة في الصف الأول
+    sh.getRange(1, 1, 1, requiredHeaders.length)
+      .setValues([ requiredHeaders ]);
+  }
+
+  return sh;
+}
+
+/**
+ * تأكد من وجود جميع الشيتات بالسكيمة الصح
+ * هذه الدالة تُستدعى عند كل doGet بالبداية
+ */
+function setupSheetsIfMissing() {
+  ensureSheetAndHeader(SHEET_NAMES.TRANSACTIONS);
+  ensureSheetAndHeader(SHEET_NAMES.CATEGORIES);
+  ensureSheetAndHeader(SHEET_NAMES.BILLS);
+  ensureSheetAndHeader(SHEET_NAMES.GOALS);
+  ensureSheetAndHeader(SHEET_NAMES.SHOPPING);
+}
+
+/**
+ * رجّع الشيت جاهز (بعد ما نتأكد أنه موجود وسليم)
+ */
+function getSheet(name) {
+  return ensureSheetAndHeader(name);
+}
+
+/**
+ * توليد ID فريد بسيط
+ */
+function genId() {
+  return (
+    new Date().getTime().toString(36) +
+    "-" +
+    Math.floor(Math.random() * 1e8).toString(36)
+  );
+}
+
+/**
+ * تحويل صف (Array) إلى object حسب الهيدر
+ */
+function rowToObj(headers, rowValues) {
+  var obj = {};
+  for (var i = 0; i < headers.length; i++) {
+    obj[headers[i]] = rowValues[i] !== undefined ? rowValues[i] : "";
+  }
+  return obj;
+}
+
+/**
+ * قراءة شيت بالكامل وتحويله لمصفوفة Objects
+ * بيتجاهل الصفوف الفاضية بالكامل
+ */
+function sheetToObjects(sheet) {
+  var rng = sheet.getDataRange();
+  var values = rng.getValues(); // 2D
+  if (values.length < 2) {
+    return [];
+  }
+  var headers = values[0].map(function(h) { return h.toString(); });
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var rowObj = rowToObj(headers, values[r]);
+    // شيك إذا الصف كله فاضي
+    var isEmpty = true;
+    for (var k in rowObj) {
+      if (rowObj[k] !== "" && rowObj[k] !== null && rowObj[k] !== undefined) {
+        isEmpty = false;
+        break;
+      }
+    }
+    if (!isEmpty) {
+      out.push(rowObj);
+    }
+  }
+  return out;
+}
+
+/**
+ * استبدال كامل محتوى الشيت بقائمة JSON Objects
+ * (يحافظ على الهيدر ويعيد تعبئة الباقي)
+ */
+function overwriteObjectsToSheet(sheet, objectsArray) {
+  var requiredHeaders = SHEET_SCHEMAS[sheet.getName()];
+  if (!requiredHeaders) {
+    throw new Error("No schema for sheet " + sheet.getName());
+  }
+
+  // لو المصفوفة فاضية، امسح وارسم الهيدر فقط
+  if (!objectsArray || !objectsArray.length) {
+    sheet.clearContents();
+    sheet.getRange(1, 1, 1, requiredHeaders.length)
+      .setValues([ requiredHeaders ]);
+    return;
+  }
+
+  // حضّر البيانات
+  var data = objectsArray.map(function(obj){
+    return requiredHeaders.map(function(h){
+      return obj[h] !== undefined ? obj[h] : "";
+    });
+  });
+
+  // اكتب الهيدر + الداتا
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, requiredHeaders.length)
+    .setValues([ requiredHeaders ]);
+  sheet.getRange(2, 1, data.length, requiredHeaders.length)
+    .setValues(data);
+}
+
+
+/**
+ * ===========================
+ *  HANDLERS: Transactions
+ * ===========================
+ */
+
+// قراءة كل الحركات (دخل+مصروف)
+function handleGetTransactions() {
+  var sh = getSheet(SHEET_NAMES.TRANSACTIONS);
+  var arr = sheetToObjects(sh);
+  return {
+    ok: true,
+    transactions: arr
+  };
+}
+
+// إضافة دخل أو مصروف
+function handleAddTransaction(e) {
+  var sh = getSheet(SHEET_NAMES.TRANSACTIONS);
+  var id = genId();
+  var ts = new Date().toISOString();
+
+  var type = e.parameter.type || "";
+  var catsJson = e.parameter.categories || "[]";
+  var catsArr;
+  try {
+    catsArr = JSON.parse(catsJson);
+  } catch (err) {
+    catsArr = [];
+  }
+
+  var amount = Number(e.parameter.amount || 0);
+  var note   = e.parameter.note   || "";
+  var source = e.parameter.source || "";
+
+  // نقرأ الهيدر من الصف الأول (المفروض مضبوط لأنه اتأمن)
+  var headers = SHEET_SCHEMAS[SHEET_NAMES.TRANSACTIONS];
+
+  var newRow = headers.map(function(h){
+    if (h === "id")         return id;
+    if (h === "timestamp")  return ts;
+    if (h === "type")       return type;
+    if (h === "categories") return catsArr.join(", ");
+    if (h === "amount")     return amount;
+    if (h === "note")       return note;
+    if (h === "source")     return source;
+    return "";
+  });
+
+  sh.appendRow(newRow);
+
+  return {
+    ok: true,
+    id: id
+  };
+}
+
+// حذف حركة حسب id
+function handleDeleteTransaction(e) {
+  var sh = getSheet(SHEET_NAMES.TRANSACTIONS);
+  var targetId = e.parameter.id || "";
+  if (!targetId) {
+    return { ok:false, error:"NO_ID" };
+  }
+
+  var values = sh.getDataRange().getValues();
+  if (values.length < 2) {
+    return { ok:false, error:"NOT_FOUND" };
+  }
+
+  var headers = values[0];
+  var idColIndex = headers.indexOf("id");
+  if (idColIndex === -1) {
+    return { ok:false, error:"NO_ID_COL" };
+  }
+
+  for (var r=1; r<values.length; r++) {
+    if (values[r][idColIndex] === targetId) {
+      sh.deleteRow(r+1); // الشيت 1-based
+      return { ok:true };
+    }
+  }
+
+  return { ok:false, error:"NOT_FOUND" };
+}
+
+
+/**
+ * ===========================
+ *  HANDLERS: Categories
+ * ===========================
+ */
+
+// قراءة الفئات المحفوظة
+function handleGetCategories() {
+  var sh = getSheet(SHEET_NAMES.CATEGORIES);
+  var arr = sheetToObjects(sh); // [{category:"أكل"},...]
+  var cats = arr
+    .map(function(o){ return o.category; })
+    .filter(Boolean);
+
+  return {
+    ok: true,
+    categories: cats
+  };
+}
+
+// حفظ لستة الفئات كاملة
+function handleSaveCategories(e) {
+  var sh = getSheet(SHEET_NAMES.CATEGORIES);
+
+  var catsJson = e.parameter.categories || "[]";
+  var catsArr;
+  try {
+    catsArr = JSON.parse(catsJson);
+  } catch (err) {
+    catsArr = [];
+  }
+
+  var uniqueMap = {};
+  catsArr.forEach(function(c){
+    if (c) uniqueMap[c] = true;
+  });
+
+  var outArr = Object.keys(uniqueMap).map(function(name){
+    return { category: name };
+  });
+
+  overwriteObjectsToSheet(sh, outArr);
+
+  return {
+    ok: true,
+    savedCount: outArr.length
+  };
+}
+
+
+/**
+ * ===========================
+ *  HANDLERS: Bills
+ * ===========================
+ */
+
+// قراءة الفواتير
+function handleGetBills() {
+  var sh = getSheet(SHEET_NAMES.BILLS);
+  var arr = sheetToObjects(sh);
+  return {
+    ok: true,
+    bills: arr
+  };
+}
+
+// إضافة فاتورة
+function handleAddBill(e) {
+  var sh = getSheet(SHEET_NAMES.BILLS);
+  var id = genId();
+
+  var name    = e.parameter.name    || "";
+  var amount  = Number(e.parameter.amount || 0);
+  var dueDate = e.parameter.dueDate || "";
+  var status  = e.parameter.status  || "unpaid";
+
+  var headers = SHEET_SCHEMAS[SHEET_NAMES.BILLS];
+  var newRow = headers.map(function(h){
+    if (h === "id")       return id;
+    if (h === "name")     return name;
+    if (h === "amount")   return amount;
+    if (h === "dueDate")  return dueDate;
+    if (h === "status")   return status;
+    return "";
+  });
+
+  sh.appendRow(newRow);
+
+  return {
+    ok: true,
+    id: id
+  };
+}
+
+// تحديث حالة دفع الفاتورة
+function handleUpdateBillStatus(e) {
+  var shBills = getSheet(SHEET_NAMES.BILLS);
+  var shTx    = getSheet(SHEET_NAMES.TRANSACTIONS);
+
+  // 1) قراءة المعطيات وتطبيعها
+  var targetId  = (e.parameter.billId || "").toString().trim();
+  var newStatus = (e.parameter.status || "").toString().trim().toLowerCase();
+
+  if (!targetId || !newStatus) {
+    return { ok:false, error:"MISSING_PARAMS" };
+  }
+
+  // 2) قراءة الجدول
+  var values = shBills.getDataRange().getValues();
+  if (values.length < 2) {
+    return { ok:false, error:"NOT_FOUND" };
+  }
+
+  var headers = values[0];
+  var idCol   = headers.indexOf("id");
+  var nameCol = headers.indexOf("name");
+  var amtCol  = headers.indexOf("amount");
+  var stCol   = headers.indexOf("status");
+
+  if (idCol === -1 || stCol === -1 || nameCol === -1 || amtCol === -1) {
+    return { ok:false, error:"NO_COL" };
+  }
+
+  // 3) ابحث عن الفاتورة
+  for (var r = 1; r < values.length; r++) {
+    if (values[r][idCol] === targetId) {
+      var oldStatus = (values[r][stCol] || "").toString().trim().toLowerCase();
+
+      // لو ما في تغيير، اطلع بدون إضافة مصروف
+      if (oldStatus === newStatus) {
+        return { ok:true, note:"NO_CHANGE" };
+      }
+
+      // حدّث الحالة
+      shBills.getRange(r+1, stCol+1).setValue(newStatus);
+
+      // 4) لو اتغيّرت إلى paid، أضف مصروف
+      if (newStatus === "paid") {
+        var billName   = (values[r][nameCol] || "").toString().trim();
+
+        // تنظيف المبلغ من أي رموز وفواصل: "1,000.50 ر.س" -> "1000.50"
+        var rawAmt = (values[r][amtCol] || "").toString();
+        var cleanedAmt = rawAmt.replace(/[^\d\.\-]/g, ""); // يشيل كل شيء غير الأرقام والنقطة والسالب
+        // دعم الفاصلة كفاصل عشري لبعض الجداول
+        if (cleanedAmt.indexOf(".") === -1 && /,\d{1,2}$/.test(rawAmt)) {
+          cleanedAmt = rawAmt.replace(/\./g, "").replace(",", ".");
+          cleanedAmt = cleanedAmt.replace(/[^\d\.\-]/g, "");
+        }
+
+        var billAmount = Number(cleanedAmt);
+        if (!isFinite(billAmount)) billAmount = 0;
+
+        // ما نمنع الإضافة لو صفر، بس كثيرين يفضّلوا منع صفوف صفرية:
+        if (!billName) {
+          return { ok:false, error:"EMPTY_BILL_NAME" };
+        }
+        if (billAmount <= 0) {
+          return { ok:false, error:"INVALID_AMOUNT", raw: rawAmt, cleaned: cleanedAmt };
+        }
+
+        var txHeaders = SHEET_SCHEMAS[SHEET_NAMES.TRANSACTIONS];
+        var txId = genId();
+        var ts  = new Date().toISOString();
+
+        var newTxRow = txHeaders.map(function(h){
+          if (h === "id")         return txId;
+          if (h === "timestamp")  return ts;
+          if (h === "type")       return "expense";
+          if (h === "categories") return billName;
+          if (h === "amount")     return billAmount;
+          if (h === "note")       return "فاتورة مدفوعة";
+          if (h === "source")     return "";
+          return "";
+        });
+
+        shTx.appendRow(newTxRow);
+        return { ok:true, txId: txId, amount: billAmount, category: billName };
+      }
+
+      return { ok:true };
+    }
+  }
+
+  return { ok:false, error:"NOT_FOUND" };
+}
+
+
+/**
+ * ===========================
+ *  HANDLERS: Goals & Yearly
+ * ===========================
+ */
+
+// يرجع الأهداف + البنود السنوية
+function handleGetGoalsAndYearly() {
+  var sh = getSheet(SHEET_NAMES.GOALS);
+  var arr = sheetToObjects(sh);
+
+  var goals = [];
+  var yearlyItems = [];
+
+  arr.forEach(function(row){
+    if (row.rowType === "goal") {
+      goals.push({
+        id: row.id,
+        goalName: row.goalName,
+        goalTarget: Number(row.goalTarget || 0),
+        goalNote: row.goalNote || ""
+      });
+    } else if (row.rowType === "yearly") {
+      yearlyItems.push({
+        id: row.id,
+        yearlyName: row.yearlyName,
+        yearlyAmount: Number(row.yearlyAmount || 0)
+      });
+    }
+  });
+
+  return {
+    ok: true,
+    goals: goals,
+    yearlyItems: yearlyItems
+  };
+}
+
+// إضافة هدف مالي
+function handleAddGoal(e) {
+  var sh = getSheet(SHEET_NAMES.GOALS);
+
+  var id      = genId();
+  var gName   = e.parameter.goalName   || "";
+  var gTarget = Number(e.parameter.goalTarget || 0);
+  var gNote   = e.parameter.goalNote   || "";
+
+  var headers = SHEET_SCHEMAS[SHEET_NAMES.GOALS];
+  var newRow = headers.map(function(h){
+    if (h === "id")          return id;
+    if (h === "rowType")     return "goal";
+    if (h === "goalName")    return gName;
+    if (h === "goalTarget")  return gTarget;
+    if (h === "goalNote")    return gNote;
+    // yearlyName, yearlyAmount تبقى فاضية
+    return "";
+  });
+
+  sh.appendRow(newRow);
+
+  return {
+    ok: true,
+    id: id
+  };
+}
+
+// إضافة بند سنوي
+function handleAddYearlyItem(e) {
+  var sh = getSheet(SHEET_NAMES.GOALS);
+
+  var id      = genId();
+  var yName   = e.parameter.yearlyName   || "";
+  var yAmount = Number(e.parameter.yearlyAmount || 0);
+
+  var headers = SHEET_SCHEMAS[SHEET_NAMES.GOALS];
+  var newRow = headers.map(function(h){
+    if (h === "id")             return id;
+    if (h === "rowType")        return "yearly";
+    if (h === "yearlyName")     return yName;
+    if (h === "yearlyAmount")   return yAmount;
+    // goalName/goalTarget/goalNote فاضي
+    return "";
+  });
+
+  sh.appendRow(newRow);
+
+  return {
+    ok: true,
+    id: id
+  };
+}
+
+
+/**
+ * ===========================
+ *  HANDLERS: Shopping
+ * ===========================
+ */
+
+// قراءة قائمة المشتريات
+function handleGetShoppingList() {
+  var sh = getSheet(SHEET_NAMES.SHOPPING);
+  var arr = sheetToObjects(sh);
+  return {
+    ok: true,
+    items: arr
+  };
+}
+
+// إضافة عنصر جديد في قائمة المشتريات
+function handleAddShoppingItem(e) {
+  var sh = getSheet(SHEET_NAMES.SHOPPING);
+  var id = genId();
+  var itemName = e.parameter.itemName || "";
+
+  var headers = SHEET_SCHEMAS[SHEET_NAMES.SHOPPING];
+  var newRow = headers.map(function(h){
+    if (h === "id")            return id;
+    if (h === "name")          return itemName;
+    if (h === "priceRecorded") return "";
+    if (h === "purchased")     return "no";
+    return "";
+  });
+
+  sh.appendRow(newRow);
+
+  return {
+    ok: true,
+    id: id
+  };
+}
+
+// تأشير "تم الشراء":
+// 1. نحدّث الصف في Shopping بسعر الشراء و purchased="yes"
+// 2. نضيف صف "expense" في Transactions بنفس السعر
+// 3. نحذف الصف من Shopping (زي ما طلبت: بعد الشراء تنتقل وتصير مصروف)
+function handleMarkShoppingPurchased(e) {
+  var shShop = getSheet(SHEET_NAMES.SHOPPING);
+  var shTx   = getSheet(SHEET_NAMES.TRANSACTIONS);
+
+  var itemId = e.parameter.itemId || "";
+  var price  = Number(e.parameter.price || 0);
+
+  if (!itemId || !price) {
+    return { ok:false, error:"MISSING_PARAMS" };
+  }
+
+  var values = shShop.getDataRange().getValues();
+  if (values.length < 2) {
+    return { ok:false, error:"NOT_FOUND" };
+  }
+
+  var headers = values[0];
+  var idCol    = headers.indexOf("id");
+  var nameCol  = headers.indexOf("name");
+  var priceCol = headers.indexOf("priceRecorded");
+  var purCol   = headers.indexOf("purchased");
+
+  if (idCol === -1) {
+    return { ok:false, error:"NO_ID_COL" };
+  }
+
+  var foundRowIndex = -1;
+  var foundName = "";
+
+  for (var r=1; r<values.length; r++) {
+    if (values[r][idCol] === itemId) {
+      foundRowIndex = r+1; // 1-based
+      foundName = values[r][nameCol] || "";
+      break;
+    }
+  }
+
+  if (foundRowIndex === -1) {
+    return { ok:false, error:"NOT_FOUND" };
+  }
+
+  // 1) حدّث صف المشتريات (السعر + purchased=yes)
+  if (priceCol !== -1) {
+    shShop.getRange(foundRowIndex, priceCol+1).setValue(price);
+  }
+  if (purCol !== -1) {
+    shShop.getRange(foundRowIndex, purCol+1).setValue("yes");
+  }
+
+  // 2) ضف مصروف في Transactions
+  var txHeaders = SHEET_SCHEMAS[SHEET_NAMES.TRANSACTIONS];
+  var txId = genId();
+  var ts  = new Date().toISOString();
+
+  // نعتبر اسم العنصر هو الفئة
+  // note دايمًا "من قائمة المشتريات"
+  var newTxRow = txHeaders.map(function(h){
+    if (h === "id")         return txId;
+    if (h === "timestamp")  return ts;
+    if (h === "type")       return "expense";
+    if (h === "categories") return foundName;
+    if (h === "amount")     return price;
+    if (h === "note")       return "من قائمة المشتريات";
+    if (h === "source")     return "";
+    return "";
+  });
+
+  shTx.appendRow(newTxRow);
+
+  // 3) احذف السطر من Shopping
+  shShop.deleteRow(foundRowIndex);
+
+  return {
+    ok: true,
+    purchasedName: foundName,
+    price: price,
+    txId: txId
+  };
+}
+
+
+/**
+ * ===========================
+ *  doGet (نقطة الدخول)
+ * ===========================
+ *
+ * أي طلب GET من الواجهة يجي هون.
+ * أول خطوة: setupSheetsIfMissing()
+ * عشان نتأكد إن كل الشيتات موجودة ومجهزة بالهيدر.
+ */
+function doGet(e) {
+  // إنشاء/تصحيح الشيتات والهيدر لو لسا مش جاهزين
+  setupSheetsIfMissing();
+
+  var action = e.parameter.action || "";
+  var out;
+
+  switch (action) {
+    /* الحركات (دخل/مصروف) */
+    case "getTransactions":
+      out = handleGetTransactions();
+      break;
+    case "addTransaction":
+      out = handleAddTransaction(e);
+      break;
+    case "deleteTransaction":
+      out = handleDeleteTransaction(e);
+      break;
+
+    /* الفئات */
+    case "getCategories":
+      out = handleGetCategories();
+      break;
+    case "saveCategories":
+      out = handleSaveCategories(e);
+      break;
+
+    /* الفواتير */
+    case "getBills":
+      out = handleGetBills();
+      break;
+    case "addBill":
+      out = handleAddBill(e);
+      break;
+    case "updateBillStatus":
+      out = handleUpdateBillStatus(e);
+      break;
+
+    /* الأهداف والبنود السنوية */
+    case "getGoalsAndYearly":
+      out = handleGetGoalsAndYearly();
+      break;
+    case "addGoal":
+      out = handleAddGoal(e);
+      break;
+    case "addYearlyItem":
+      out = handleAddYearlyItem(e);
+      break;
+
+    /* المشتريات (قائمة زوجتك) */
+    case "getShoppingList":
+      out = handleGetShoppingList();
+      break;
+    case "addShoppingItem":
+      out = handleAddShoppingItem(e);
+      break;
+    case "markShoppingPurchased":
+      out = handleMarkShoppingPurchased(e);
+      break;
+
+    default:
+      out = { ok: false, error: "UNKNOWN_ACTION" };
+      break;
+  }
+
+  return sendJSON_(out);
+}
+
+/**
+ * إرجاع JSON كـ HTTP Response
+ */
+function sendJSON_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
